@@ -1,6 +1,6 @@
 # Orbital Academy — 3D Spaceflight Training Simulator
 
-A browser-based, physically grounded spaceflight simulator built around an **astronaut training curriculum**. Fly a crew capsule in low Earth orbit over real NASA imagery of the Earth: attitude control, orbital manoeuvres, rendezvous and **manual docking with the International Space Station**, **orbital-debris avoidance**, and a lifting re-entry with parachute splashdown. Every module is **points-based** with stars, XP, collectible patches, a **daily challenge** and a **global leaderboard**. Fly together with friends in **serverless multiplayer** (WebRTC + Nostr). Works on **desktop and phones**.
+A browser-based, physically grounded spaceflight simulator built around an **astronaut training curriculum**. Fly a crew capsule in low Earth orbit over real NASA imagery of the Earth: attitude control, orbital manoeuvres, rendezvous and **manual docking with the International Space Station**, **orbital-debris avoidance**, and a lifting re-entry with parachute splashdown. Every module is **points-based** with stars, XP, collectible patches, a **daily challenge** and a **global leaderboard**. Fly together with friends in **serverless multiplayer** (WebRTC + Nostr). Works on **desktop, phones and with game controllers**.
 
 **No servers.** The game is a static site on GitHub Pages; multiplayer handshakes and the leaderboard use public Nostr relays; gameplay traffic is peer-to-peer.
 
@@ -73,6 +73,8 @@ Fully synthesized with the Web Audio API (no audio files): a generative ambient 
 | . / , | Time warp up/down (0 = reset) |
 | Mouse drag / wheel | Orbit / zoom camera |
 | P / Esc | Pause · **F1** help · **Enter** chat (multiplayer) |
+
+**Game controllers** (Xbox, PlayStation, Switch Pro and other standard-mapping pads, wired or Bluetooth): left stick pitch/yaw, LB/RB roll, right stick RCS translation (orbits the camera in map view), D-pad ↑/↓ fore/aft, LT/RT throttle, A stage/undock, B cut engine, X SAS on/off, Y next SAS mode, D-pad ←/→ time warp, L3 camera, R3 precision, View map, Menu pause. Menus and dialogs are fully navigable with the D-pad/left stick + A/B, and the controller rumbles on docking, staging, chute deployment, engine burns and re-entry buffeting.
 
 **Phones & tablets:** left stick = pitch/yaw, right stick = RCS translation, side buttons = roll and fore/aft, slider = throttle, plus STAGE / CUT / CAM / MAP / warp / SAS / pause / chat buttons. One finger orbits the camera, two fingers pinch-zoom. Landscape recommended; can be installed to the home screen.
 

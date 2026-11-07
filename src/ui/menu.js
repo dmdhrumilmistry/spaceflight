@@ -439,6 +439,10 @@ export class Menu {
           <p>Left stick: pitch &amp; yaw. Right stick: RCS translation (switch to roll with ⟳). Slider: throttle. Buttons: SAS modes, stage, camera, map and warp. Landscape works best.</p>
         </div>
         <div>
+          <h3>Game controller</h3>
+          <p>Plug in or pair any standard pad. Left stick pitch/yaw, LB/RB roll, right stick RCS translation, LT/RT throttle, A stage, B cut, X SAS, Y next SAS mode, D-pad ←/→ time warp, View map, Menu pause. Menus work with the D-pad and A/B.</p>
+        </div>
+        <div>
           <h3>Scoring</h3>
           <p>Every module awards points for objectives, then bonuses for precision, propellant economy and time. Earn ★★★, collect patches, keep your daily streak and climb the global Nostr leaderboard.</p>
         </div>

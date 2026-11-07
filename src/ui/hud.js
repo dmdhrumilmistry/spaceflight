@@ -548,6 +548,19 @@ const HELP_HTML = `
       <tr><td>Enter</td><td>Chat (multiplayer)</td></tr>
       <tr><td>F1 or /</td><td>This help</td></tr>
     </table>
+    <table>
+      <tr><th colspan="2">Game controller</th></tr>
+      <tr><td>Left stick</td><td>Pitch / yaw</td></tr>
+      <tr><td>LB / RB</td><td>Roll left / right</td></tr>
+      <tr><td>Right stick</td><td>RCS translate (map: orbit camera)</td></tr>
+      <tr><td>D-pad ↑ / ↓</td><td>Translate forward / aft</td></tr>
+      <tr><td>LT / RT</td><td>Throttle down / up</td></tr>
+      <tr><td>A · B</td><td>Stage / undock · cut engine</td></tr>
+      <tr><td>X · Y</td><td>SAS on/off · next SAS mode</td></tr>
+      <tr><td>D-pad ← / →</td><td>Time warp − / +</td></tr>
+      <tr><td>L3 · R3</td><td>Camera · precision</td></tr>
+      <tr><td>View · Menu</td><td>Map · pause</td></tr>
+    </table>
   </div>
   <p class="note">Navball markers: <b style="color:#ffe14d">⊕ prograde / ⊗ retrograde</b>, <b style="color:#d36bff">▲ normal / ▼ anti-normal</b>, <b style="color:#4de1ff">radial out / in</b>, <b style="color:#ff4fa3">◉ target</b>. Click anywhere to close.</p>
 </div>`;

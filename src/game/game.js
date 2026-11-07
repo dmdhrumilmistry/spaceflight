@@ -123,6 +123,8 @@ export class Game {
     } catch {
       /* audio is optional */
     }
+    const rumble = { dock: [0.8, 350], bump: [1, 250], stage: [0.9, 400], chute: [0.7, 300], splash: [1, 500], alarm: [1, 600], undock: [0.4, 200] }[name];
+    if (rumble && this.rumble) this.rumble(...rumble);
   }
 
   complete(success, reason) {
@@ -244,12 +246,7 @@ export class Game {
           ship.throttle = 0;
           break;
         case 'Space':
-          if (this.docked) {
-            this.undock();
-            break;
-          }
-          if (ship.stage === 0 && !confirmStage(this)) break;
-          this.doStage();
+          this.requestStage();
           break;
         case 'KeyV':
           this.view.cycleCamera();
@@ -279,6 +276,13 @@ export class Game {
     });
     this.input.onDrag = (dx, dy) => this.view.orbitInput(dx, dy);
     this.input.onZoom = (d) => this.view.zoomInput(d);
+  }
+
+  /** Stage / undock from any input device (asks for confirmation before dropping the SM). */
+  requestStage() {
+    if (this.docked) return this.undock();
+    if (this.ship.stage === 0 && !confirmStage(this)) return;
+    this.doStage();
   }
 
   doStage() {
@@ -454,9 +458,17 @@ export class Game {
   }
 
   updateAudio(dt) {
+    const ship = this.ship;
+    if (this.rumble && this.state === 'flying') {
+      this.rumbleTimer = (this.rumbleTimer || 0) - dt;
+      const level = Math.max(ship.thrustActive ? 0.12 + 0.25 * ship.throttle : 0, Math.min(1, ship.heatFlux / 8e5), Math.min(1, Math.max(0, ship.gForce - 2) / 6));
+      if (this.rumbleTimer <= 0 && level > 0.05) {
+        this.rumbleTimer = 0.2;
+        this.rumble(level, 220);
+      }
+    }
     const a = this.audio;
     if (!a) return;
-    const ship = this.ship;
     const rc = ship.rotCmd;
     const tc = ship.transCmd;
     const rcs = Math.min(1, (Math.abs(rc.x) + Math.abs(rc.y) + Math.abs(rc.z)) * 0.4 + (Math.abs(tc.x) + Math.abs(tc.y) + Math.abs(tc.z)) * 0.6);
@@ -493,10 +505,8 @@ export class Game {
     const ship = this.ship;
     const I = this.input;
     // KSP-style: W pitch down (nose down) / S pitch up; A/D yaw; Q/E roll
-    const v1 = I.virtual || {};
-    const v2 = I.agent || {};
     const vv = {};
-    for (const k of ['pitch', 'yaw', 'roll', 'x', 'y', 'z']) vv[k] = (v1[k] || 0) + (v2[k] || 0);
+    for (const k of ['pitch', 'yaw', 'roll', 'x', 'y', 'z']) vv[k] = (I.virtual?.[k] || 0) + (I.agent?.[k] || 0) + (I.pad?.[k] || 0);
     const c1 = (x) => Math.max(-1, Math.min(1, x));
     ship.rotInput.set(c1(I.axis('KeyW', 'KeyS') + (vv.pitch || 0)), c1(I.axis('KeyD', 'KeyA') + (vv.yaw || 0)), c1(I.axis('KeyE', 'KeyQ') + (vv.roll || 0)));
     ship.transInput.set(c1(I.axis('KeyJ', 'KeyL') + (vv.x || 0)), c1(I.axis('KeyK', 'KeyI') + (vv.y || 0)), c1(I.axis('KeyH', 'KeyN') + (vv.z || 0)));

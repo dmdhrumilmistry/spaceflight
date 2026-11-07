@@ -1697,3 +1697,13 @@ body.portrait.touch .tactions {
   top: 64px;
   bottom: auto;
 }
+
+/* controller / keyboard focus */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+.padfocus {
+  outline: 2px solid var(--accent2) !important;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px rgba(255, 179, 71, 0.22);
+}
