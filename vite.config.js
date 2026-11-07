@@ -5,9 +5,6 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
-    proxy: {
-      '/signal': { target: 'ws://localhost:8787', ws: true },
-    },
   },
   build: {
     target: 'es2022',

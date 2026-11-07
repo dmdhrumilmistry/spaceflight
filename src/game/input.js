@@ -4,7 +4,6 @@ export class Input {
     this.keys = new Set();
     this.handlers = [];
     this.enabled = true;
-    this.drag = null;
     this.onDrag = null;
     this.onZoom = null;
     const typing = (e) => {
@@ -24,18 +23,35 @@ export class Input {
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    // one pointer drags the camera, two pointers pinch-zoom (touch screens)
+    const pts = new Map();
+    let pinch = 0;
     canvas.addEventListener('pointerdown', (e) => {
-      this.drag = { x: e.clientX, y: e.clientY };
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       canvas.setPointerCapture(e.pointerId);
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        pinch = Math.hypot(a.x - b.x, a.y - b.y);
+      }
     });
     canvas.addEventListener('pointermove', (e) => {
-      if (!this.drag) return;
-      const dx = e.clientX - this.drag.x;
-      const dy = e.clientY - this.drag.y;
-      this.drag = { x: e.clientX, y: e.clientY };
-      if (this.onDrag) this.onDrag(dx, dy);
+      const prev = pts.get(e.pointerId);
+      if (!prev) return;
+      const cur = { x: e.clientX, y: e.clientY };
+      pts.set(e.pointerId, cur);
+      if (pts.size === 1) {
+        if (this.onDrag) this.onDrag(cur.x - prev.x, cur.y - prev.y);
+      } else if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinch > 0 && this.onZoom) this.onZoom((pinch - d) * 4);
+        pinch = d;
+      }
     });
-    const end = () => (this.drag = null);
+    const end = (e) => {
+      pts.delete(e.pointerId);
+      pinch = 0;
+    };
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
     canvas.addEventListener(

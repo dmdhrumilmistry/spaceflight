@@ -4,7 +4,8 @@ import { Vector3, Quaternion, Matrix4 } from 'three';
 import { MU } from './constants.js';
 import { stateFromElements } from './orbit.js';
 
-export const STATION_PORT_LOCAL = new Vector3(0, 0, -27.6);
+// Default port: IDA-2 on PMA-2, Harmony forward (see render/issModel.js)
+export const STATION_PORT_LOCAL = new Vector3(0, 0, -20.6);
 
 const m4 = new Matrix4();
 const X = new Vector3();
@@ -12,7 +13,9 @@ const Y = new Vector3();
 const Z = new Vector3();
 
 export class Station {
-  constructor({ a, i = 0, raan = 0, nu0 = 0, t0 = 0, colliders = [] }) {
+  constructor({ a, i = 0, raan = 0, nu0 = 0, t0 = 0, colliders = [], portLocal = STATION_PORT_LOCAL, name = 'ISS' }) {
+    this.portLocal = portLocal.clone();
+    this.name = name;
     this.a = a;
     this.i = i;
     this.raan = raan;
@@ -51,7 +54,7 @@ export class Station {
     return out.copy(local).applyQuaternion(this.q).add(this.r);
   }
   portWorld(out = new Vector3()) {
-    return this.toWorld(STATION_PORT_LOCAL, out);
+    return this.toWorld(this.portLocal, out);
   }
   portAxis(out = new Vector3()) {
     return out.set(0, 0, -1).applyQuaternion(this.q);

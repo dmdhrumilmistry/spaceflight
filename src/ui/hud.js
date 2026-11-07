@@ -131,6 +131,8 @@ export class Hud {
       b.className = 'sasbtn';
       b.innerHTML = SAS_LABELS[mode][0];
       b.title = SAS_LABELS[mode][1];
+      b.setAttribute('aria-label', 'SAS ' + SAS_LABELS[mode][1]);
+      b.dataset.testid = 'sas-' + mode;
       b.addEventListener('click', () => this.onSas && this.onSas(mode));
       this.el.sas.appendChild(b);
       this.sasButtons[mode] = b;
@@ -203,20 +205,37 @@ export class Hud {
     const rows = [...res.log, ...res.bonuses.map((b) => ({ ...b, bonus: true }))]
       .map((r) => `<tr class="${r.points < 0 ? 'neg' : ''}"><td>${r.bonus ? 'Bonus · ' : ''}${esc(r.label)}</td><td>${r.points >= 0 ? '+' : ''}${r.points}</td></tr>`)
       .join('');
+    const next = mission.stars.find((s) => s > res.total);
+    const patches = (res.achievements || []).map((a) => `<span class="chip">${a.icon} ${esc(a.title)}</span>`).join('');
     const o = this.overlay(`
-      <div class="card result ${res.success ? 'ok' : 'fail'}">
-        <div class="tag">${esc(mission.title)}</div>
+      <div class="card result ${res.success ? 'ok' : 'fail'}" role="dialog" aria-label="Mission result">
+        <div class="tag">${esc(mission.title)}${res.daily ? ' · DAILY CHALLENGE' : ''}</div>
         <h1>${res.success ? 'Mission complete' : 'Mission failed'}</h1>
         <p class="summary">${esc(res.reason || '')}</p>
-        ${mission.free ? '' : `<div class="stars">${stars}</div><div class="total">${res.total} <small>points</small>${res.isBest ? '<span class="best">NEW BEST</span>' : ''}</div>`}
+        ${mission.free ? '' : `<div class="stars">${stars}</div><div class="total" data-testid="result-total">${res.total} <small>points</small>${res.isBest ? '<span class="best">NEW BEST</span>' : ''}</div>`}
+        ${res.xpGained ? `<div class="xpline">+${res.xpGained} XP${res.levelUp ? ` · <b>LEVEL UP → ${res.levelUp}</b>` : ''}${next && res.success ? ` · ${next - res.total} pts to the next ★` : ''}</div>` : ''}
+        ${patches ? `<div class="chips">${patches}</div>` : ''}
         <table class="breakdown">${rows}</table>
-        ${res.success ? '' : '<p class="note">Failed missions keep 25% of points earned.</p>'}
-        <div class="buttons"><button class="primary" id="rRetry">Retry</button><button id="rNext">Next mission ▸</button><button id="rMenu">Menu</button><button id="rFly">Keep flying</button></div>
+        ${res.success ? '' : '<p class="note">Failed missions keep 25% of points earned. Try again — every attempt earns XP.</p>'}
+        <div class="buttons"><button class="primary" id="rRetry" data-testid="retry">Retry</button><button id="rNext">Next mission ▸</button><button id="rShare">Share</button><button id="rMenu">Menu</button><button id="rFly">Keep flying</button></div>
       </div>`);
     $('#rRetry', o).onclick = () => this.onAction && this.onAction('restart');
     $('#rNext', o).onclick = () => this.onAction && this.onAction('next');
     $('#rMenu', o).onclick = () => this.onAction && this.onAction('menu');
     $('#rFly', o).onclick = () => this.hideOverlays();
+    $('#rShare', o).onclick = async () => {
+      const text = `🚀 ${mission.title}: ${res.total} pts ${'★'.repeat(res.stars)} in Orbital Academy — can you beat it?`;
+      const url = location.origin + location.pathname;
+      try {
+        if (navigator.share) await navigator.share({ title: 'Orbital Academy', text, url });
+        else {
+          await navigator.clipboard.writeText(`${text} ${url}`);
+          this.toast('Copied to clipboard', 'good');
+        }
+      } catch {
+        /* cancelled */
+      }
+    };
   }
 
   toggleHelp() {
@@ -234,12 +253,21 @@ export class Hud {
     setTimeout(() => d.remove(), 4200);
   }
 
-  popup(points, label, type) {
+  popup(points, label, type, combo = 0) {
     const d = document.createElement('div');
     d.className = `popup ${type}`;
-    d.innerHTML = `<b>${esc(points)}</b> ${esc(label)}`;
+    d.innerHTML = `<b>${esc(points)}</b> ${esc(label)}${combo >= 3 ? `<i class="combo">×${combo} streak</i>` : ''}`;
     this.el.popups.appendChild(d);
     setTimeout(() => d.remove(), 2600);
+  }
+
+  achievement(a) {
+    const d = document.createElement('div');
+    d.className = 'achv';
+    d.innerHTML = `<div class="ic">${a.icon}</div><div><small>PATCH UNLOCKED · +150 XP</small><b>${esc(a.title)}</b><span>${esc(a.desc)}</span></div>`;
+    document.body.appendChild(d);
+    setTimeout(() => d.classList.add('out'), 3600);
+    setTimeout(() => d.remove(), 4300);
   }
 
   openChat() {
@@ -324,7 +352,7 @@ export class Hud {
     this.el.gLabel.textContent = `${ship.gForce.toFixed(1)}G`;
     for (const [mode, b] of Object.entries(this.sasButtons)) {
       b.classList.toggle('active', ship.sasEnabled && ship.sasMode === mode);
-      b.disabled = ship.sasLocked || ((mode === 'target' || mode === 'antiTarget') && !game.station);
+      b.disabled = ship.sasLocked || ((mode === 'target' || mode === 'antiTarget') && !game.target);
     }
     // heading / pitch / roll relative to local horizon
     const up = ship.r.clone().normalize();
@@ -357,14 +385,15 @@ export class Hud {
       <div class="row"><span>LIGHT</span><b>${ship.eclipse > 0.5 ? 'Daylight' : 'Eclipse'}</b></div>`;
 
     // ---- target ----
-    if (game.station) {
+    const tgt = game.target;
+    if (tgt) {
       const d = game.docking;
-      const dist = ship.r.distanceTo(game.station.r);
-      const rel = ship.v.distanceTo(game.station.v);
+      const dist = ship.r.distanceTo(tgt.r);
+      const rel = ship.v.distanceTo(tgt.v);
       const ca = game.closest;
       this.el.target.classList.remove('invisible');
       this.el.target.innerHTML = `
-        <div class="ptitle">TARGET · Station</div>
+        <div class="ptitle">TARGET · ${esc(tgt.name)}</div>
         <div class="row"><span>RANGE</span><b>${fmtDist(dist)}</b></div>
         <div class="row"><span>REL SPEED</span><b>${rel.toFixed(2)} m/s</b></div>
         ${d ? `<div class="row"><span>CLOSING</span><b>${d.closing.toFixed(2)} m/s</b></div>` : ''}
@@ -459,9 +488,10 @@ export class Hud {
     const ship = game.ship;
     const isMap = view.camMode === 'map';
     if (game.state !== 'menu') {
-      if (game.station) {
-        const dist = ship.r.distanceTo(game.station.r);
-        if (dist > 400 || isMap) place('station', game.station.r, `<span class="br">STATION</span><em>${fmtDist(dist)}</em>`, 'target');
+      const tgt = game.target;
+      if (tgt) {
+        const dist = ship.r.distanceTo(tgt.r);
+        if (dist > 400 || isMap) place('station', tgt.r, `<span class="br">${esc(tgt.name.toUpperCase())}</span><em>${fmtDist(dist)}</em>`, 'target');
       }
       for (const r of remotes) {
         const dist = ship.r.distanceTo(r.r);

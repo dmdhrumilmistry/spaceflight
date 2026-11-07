@@ -11,11 +11,12 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { Earth } from './earth.js';
 import { Sky } from './sky.js';
 import { ShipModel } from './shipModel.js';
-import { StationModel } from './stationModel.js';
+import { IssModel, ISS_PORT_LOCAL } from './issModel.js';
 import { Navball } from '../ui/navball.js';
 import { R_EARTH, SUN_DIR } from '../sim/constants.js';
 import { localFrame, sampleOrbit } from '../sim/orbit.js';
 import { radialGlowTexture } from './textures.js';
+import { DebrisPopulation, makeFragmentModel } from './debrisField.js';
 
 const tmp = new THREE.Vector3();
 
@@ -121,11 +122,17 @@ export class View {
     this.mapIcon.renderOrder = 10;
     this.scene.add(this.mapIcon);
 
+    // ---- tracked objects population (map view) ----
+    this.debrisPop = new DebrisPopulation(q === 'low' ? 4000 : q === 'medium' ? 8000 : 14000);
+    this.scene.add(this.debrisPop.points);
+    this.showDebrisPop = true;
+    this.fragment = null;
+
     // ---- post processing ----
     const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: q === 'low' ? 0 : 4 });
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.6, 0.92);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.55, 1.35);
     this.bloom.enabled = settings.bloom !== false;
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
@@ -157,9 +164,18 @@ export class View {
     for (const m of this.lineMaterials) m.resolution.set(w, h);
   }
 
+  setDebrisVisible(on) {
+    if (on && !this.fragment) {
+      this.fragment = makeFragmentModel(11);
+      this.scene.add(this.fragment);
+    }
+    if (this.fragment) this.fragment.visible = on;
+  }
+
   setStation(enabled) {
     if (enabled && !this.station) {
-      this.station = new StationModel();
+      this.station = new IssModel({ quality: this.settings.quality });
+      this.station.portLocal = ISS_PORT_LOCAL;
       this.scene.add(this.station.group);
     }
     if (this.station) this.station.group.visible = enabled;
@@ -415,6 +431,17 @@ export class View {
 
     // ---------- orbit lines / map view ----------
     const isMap = this.camMode === 'map';
+    this.debrisPop.update(simTime, O, this.renderer.getPixelRatio(), isMap && this.showDebrisPop);
+    if (this.fragment) {
+      const f = state.fragment;
+      this.fragment.visible = !!f;
+      if (f) {
+        this.fragment.position.copy(f.r).sub(O);
+        this.fragment.rotation.set(simTime * 0.31, simTime * 0.53, simTime * 0.17);
+        const dist = f.r.distanceTo(this.camWorld);
+        this.fragment.userData.glint.visible = dist > 60;
+      }
+    }
     for (const k of Object.keys(this.orbitLines)) {
       const l = this.orbitLines[k];
       l.position.set(-O.x, -O.y, -O.z);

@@ -184,6 +184,10 @@ uniform float uSea;
 uniform vec3 uCamFwd;
 uniform float uPixelAngle;
 uniform float uDetail;
+uniform float uReal;       // 1 when NASA imagery is loaded
+uniform sampler2D uDay;    // Blue Marble albedo (equirectangular)
+uniform sampler2D uData;   // R water mask, G clouds, B city lights
+uniform float uTexelM;     // metres per texel at the equator
 uniform float logDepthBufFC;
 varying vec3 vRay;
 
@@ -254,6 +258,18 @@ vec3 sunTransmittance(vec3 p) {
   return exp(-(betaR * od.x + betaM * 1.1 * od.y));
 }
 
+vec2 eqUV(vec3 d) {
+  return vec2(atan(-d.z, d.x) / (2.0 * PI) + 0.5, asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
+}
+// explicit LOD from the pixel footprint: no derivatives, so no seam at the date line
+float eqLod(float footprint) {
+  return max(0.0, log2(max(footprint, 1.0) / uTexelM));
+}
+float cloudAt(vec3 dir, float lod) {
+  if (uReal > 0.5) return textureLod(uData, eqUV(dir), lod).g;
+  return textureCube(uAux, dir).r;
+}
+
 float writeDepth(float t, vec3 d) {
   float w = t * dot(d, uCamFwd);
   return log2(1.0 + w) * logDepthBufFC * 0.5;
@@ -291,23 +307,40 @@ void main() {
     vec3 Tsun = sunTransmittance(P + n * 10.0);
     float lit = smoothstep(-0.02, 0.06, NdL);
     // cloud shadow
-    float cShadow = textureCube(uAux, uCloudInv * normalize(n + uSunDir * 0.0015)).r;
+    float lod = eqLod(footprint);
+    float cShadow = cloudAt(uCloudInv * normalize(n + uSunDir * 0.0015), lod + 1.0);
     float shade = 1.0 - 0.65 * cShadow;
 
     vec3 albedo;
-    float water = step(h, uSea);
-    if (water > 0.5) {
-      float depthW = uSea - h;
-      albedo = mix(vec3(0.018, 0.10, 0.12), vec3(0.003, 0.014, 0.045), smoothstep(0.0, 0.03, depthW));
-      float lat = abs(nf.y);
-      float ice = smoothstep(0.87, 0.93, lat + 0.03 * aux.a + 0.02 * sin(nf.x * 40.0));
-      albedo = mix(albedo, vec3(0.7, 0.75, 0.8), ice);
-      water = 1.0 - ice;
+    float water;
+    float lights;
+    if (uReal > 0.5) {
+      vec2 uv = eqUV(nf);
+      vec3 dayc = textureLod(uDay, uv, lod).rgb;
+      vec4 dat = textureLod(uData, uv, lod);
+      water = smoothstep(0.35, 0.65, dat.r);
+      lights = dat.b * dat.b * 2.2;
+      vec3 ocean = mix(vec3(0.004, 0.016, 0.05), dayc * 0.6 + vec3(0.0, 0.006, 0.012), 0.35);
+      albedo = mix(dayc * 1.08, ocean, water);
+      if (detailFade > 0.0) {
+        float dn = 0.6 * snoise(nf * 900.0) + 0.3 * snoise(nf * 2600.0) + 0.1 * snoise(nf * 7000.0);
+        albedo *= 1.0 + detailFade * (1.0 - water) * 0.45 * dn;
+      }
     } else {
-      albedo = surf.rgb * surf.rgb;
-      if (detailFade > 0.0) albedo *= 1.0 + detailFade * 0.35 * snoise(nf * 900.0);
-      // beaches
-      albedo = mix(vec3(0.32, 0.28, 0.2), albedo, smoothstep(0.0, 0.004, h - uSea));
+      water = step(h, uSea);
+      lights = surf.a;
+      if (water > 0.5) {
+        float depthW = uSea - h;
+        albedo = mix(vec3(0.018, 0.10, 0.12), vec3(0.003, 0.014, 0.045), smoothstep(0.0, 0.03, depthW));
+        float lat = abs(nf.y);
+        float ice = smoothstep(0.87, 0.93, lat + 0.03 * aux.a + 0.02 * sin(nf.x * 40.0));
+        albedo = mix(albedo, vec3(0.7, 0.75, 0.8), ice);
+        water = 1.0 - ice;
+      } else {
+        albedo = surf.rgb * surf.rgb;
+        if (detailFade > 0.0) albedo *= 1.0 + detailFade * 0.35 * snoise(nf * 900.0);
+        albedo = mix(vec3(0.32, 0.28, 0.2), albedo, smoothstep(0.0, 0.004, h - uSea));
+      }
     }
     vec3 ground = albedo * Tsun * sunI * max(NdL, 0.0) / PI * shade;
     // skylight ambient
@@ -323,7 +356,7 @@ void main() {
     }
     // night lights
     float night = smoothstep(0.08, -0.12, NdL);
-    ground += vec3(1.0, 0.68, 0.32) * surf.a * night * 1.6 * (1.0 - 0.7 * cShadow);
+    ground += vec3(1.0, 0.68, 0.32) * lights * night * 1.6 * (1.0 - 0.7 * cShadow);
     color = ground;
     alpha = 1.0;
     depth = writeDepth(tg0, d);
@@ -337,7 +370,7 @@ void main() {
       vec3 Pc = o + d * tc;
       vec3 nc = normalize(Pc);
       vec3 cf = uCloudInv * nc;
-      float cov = textureCube(uAux, cf).r;
+      float cov = cloudAt(cf, eqLod(tc * uPixelAngle));
       float fp = tc * uPixelAngle;
       float df = uDetail * (1.0 - smoothstep(800.0, 6000.0, fp));
       if (df > 0.0) cov = clamp(cov + df * (0.25 * snoise(cf * 420.0) + 0.12 * snoise(cf * 1100.0)) * cov, 0.0, 1.0);
@@ -365,7 +398,8 @@ void main() {
 
 export class Earth {
   constructor(renderer, { quality = 'high', seed = 3.0 } = {}) {
-    const size = quality === 'ultra' ? 2048 : quality === 'high' ? 2048 : quality === 'medium' ? 1024 : 512;
+    // procedural maps are only a fallback until the NASA imagery has loaded
+    const size = quality === 'high' || quality === 'ultra' ? 1024 : 512;
     this.maps = bakeEarthMaps(renderer, { size, seed });
     const steps = quality === 'low' ? 8 : quality === 'medium' ? 12 : 16;
     this.uniforms = {
@@ -377,7 +411,7 @@ export class Earth {
       uRa: { value: R_EARTH + ATMO_VISUAL_HEIGHT },
       uRc: { value: R_EARTH + CLOUD_HEIGHT },
       uSunDir: { value: new THREE.Vector3(1, 0, 0) },
-      uSunI: { value: 7 },
+      uSunI: { value: 5.6 },
       uEarthInv: { value: new THREE.Matrix3() },
       uCloudInv: { value: new THREE.Matrix3() },
       uSurface: { value: this.maps.surface },
@@ -386,7 +420,12 @@ export class Earth {
       uCamFwd: { value: new THREE.Vector3(0, 0, -1) },
       uPixelAngle: { value: 0.001 },
       uDetail: { value: quality === 'low' ? 0 : 1 },
+      uReal: { value: 0 },
+      uDay: { value: null },
+      uData: { value: null },
+      uTexelM: { value: 10000 },
     };
+    this.loadImagery(quality);
     this.material = new THREE.ShaderMaterial({
       vertexShader: PLANET_VERT,
       fragmentShader: PLANET_FRAG,
@@ -409,6 +448,34 @@ export class Earth {
     this.mesh.renderOrder = -5;
     this.rotation = 0;
     this._m4 = new THREE.Matrix4();
+  }
+
+  /** Load NASA Blue Marble / night-lights / cloud imagery (public domain). */
+  loadImagery(quality) {
+    const res = quality === 'high' || quality === 'ultra' ? '4k' : '2k';
+    const base = import.meta.env?.BASE_URL ?? './';
+    const loader = new THREE.TextureLoader();
+    const prep = (t, srgb) => {
+      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      t.wrapS = THREE.RepeatWrapping;
+      t.wrapT = THREE.ClampToEdgeWrapping;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.generateMipmaps = true;
+      t.anisotropy = 8;
+      return t;
+    };
+    Promise.all([
+      loader.loadAsync(`${base}textures/earth_day_${res}.jpg`),
+      loader.loadAsync(`${base}textures/earth_data_${res}.jpg`),
+    ])
+      .then(([day, data]) => {
+        this.uniforms.uDay.value = prep(day, true);
+        this.uniforms.uData.value = prep(data, false);
+        this.uniforms.uTexelM.value = (2 * Math.PI * R_EARTH) / day.image.width;
+        this.uniforms.uReal.value = 1;
+        this.imageryLoaded = true;
+      })
+      .catch((e) => console.warn('Earth imagery unavailable, using procedural planet', e));
   }
 
   /**

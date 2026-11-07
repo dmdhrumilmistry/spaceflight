@@ -1,7 +1,7 @@
 // Astronaut training curriculum. Each mission sets up initial conditions,
 // tracks objectives, awards points and computes completion bonuses.
 import { Vector3, Matrix4 } from 'three';
-import { stateFromElements, elementsFromState, hohmannDv, orbitalDirections } from '../sim/orbit.js';
+import { stateFromElements, elementsFromState, hohmannDv, orbitalDirections, propagateKepler, closestApproach } from '../sim/orbit.js';
 import { R_EARTH, MU, SUN_DIR } from '../sim/constants.js';
 
 const KM = 1000;
@@ -54,13 +54,13 @@ export const MISSIONS = [
       'Points: speed, RCS propellant economy, pointing precision.',
     ],
     setup(game) {
-      const nu = sunlitNu(INC, RAAN, -0.2);
+      const nu = sunlitNu(INC, RAAN, -0.8);
       const s = circular(400 * KM, nu);
       const ship = game.ship;
       ship.r.copy(s.r);
       ship.v.copy(s.v);
       pointShip(ship, s.v, s.r);
-      ship.w.set(0.07, -0.05, 0.06);
+      ship.w.set(0.07, -0.05, 0.06).multiplyScalar(game.modifiers?.tumble ?? 1);
       ship.sasEnabled = false;
       ship.sasLocked = true;
       this.phase = 0;
@@ -307,7 +307,7 @@ export const MISSIONS = [
       const thetaStar = Math.PI * (1 - Math.pow(at / a2, 1.5));
       this.dn = n1 - n2;
       this.thetaStar = thetaStar;
-      const wait = 200;
+      const wait = game.modifiers?.wait ?? 200;
       const theta0 = thetaStar + this.dn * wait;
       const nuShip = sunlitNu(INC, RAAN, -1.2);
       const s = circular(400 * KM, nuShip);
@@ -393,17 +393,19 @@ export const MISSIONS = [
     ],
     hasStation: true,
     setup(game, slot = 0) {
-      const nu = sunlitNu(INC, RAAN, -0.4);
+      const mods = game.modifiers || {};
+      const nu = sunlitNu(INC, RAAN, mods.night ? Math.PI : -0.95);
       const a = R_EARTH + 420 * KM;
       game.createStation({ a, i: INC, raan: RAAN, nu0: nu, t0: game.simTime });
       const st = game.station;
       const ship = game.ship;
+      if (mods.rcsScale) ship.rcsFuel *= mods.rcsScale;
       const port = st.portWorld();
       const axis = st.portAxis();
       const side = new Vector3(1, 0, 0).applyQuaternion(st.q);
       const up = new Vector3(0, 1, 0).applyQuaternion(st.q);
-      const dist = 120 + slot * 35;
-      const nose = port.clone().addScaledVector(axis, dist).addScaledVector(side, 3.5 + slot * 6).addScaledVector(up, -2);
+      const dist = (mods.dist ?? 120) + slot * 35;
+      const nose = port.clone().addScaledVector(axis, dist).addScaledVector(side, (mods.lateral ?? 3.5) + slot * 6).addScaledVector(up, -2);
       const fwd = axis.clone().negate().applyAxisAngle(up, 3 * DEG).applyAxisAngle(side, -2 * DEG);
       pointShip(ship, fwd, up.clone().applyAxisAngle(fwd, 5 * DEG));
       ship.r.copy(nose).addScaledVector(fwd, -ship.spec.noseOffset);
@@ -459,9 +461,124 @@ export const MISSIONS = [
   },
   // ------------------------------------------------------------------
   {
+    id: 'debris',
+    title: 'Debris Avoidance',
+    tag: 'Module 6 · Space safety',
+    difficulty: 3,
+    stars: [1100, 1550, 1900],
+    summary: 'A tracked fragment will pass dangerously close. Plan and fly a collision-avoidance manoeuvre.',
+    briefing: [
+      'CONJUNCTION ALERT. A fragment of a spent rocket stage on a 98° sun-synchronous orbit will cross your path at ~10 km/s.',
+      'The TARGET panel shows TCA (time of closest approach) and the predicted MISS distance. Anything under 2 km is too close.',
+      'Burn to push the predicted miss above 2 km. Early prograde/retrograde burns (keys 2/3) are cheapest; close to TCA, radial burns (6/7) act fastest.',
+      'Then hold attitude and ride out the pass. Points: final margin, Δv economy, and how early you acted.',
+    ],
+    setup(game) {
+      const mods = game.modifiers || {};
+      this.tca = mods.tca ?? 420;
+      const miss0 = mods.miss ?? 85;
+      const nu = sunlitNu(INC, RAAN, -0.5);
+      const s = circular(415 * KM, nu);
+      const ship = game.ship;
+      ship.r.copy(s.r);
+      ship.v.copy(s.v);
+      pointShip(ship, s.v, s.r);
+      ship.setSasMode('stability');
+      // debris position at TCA: just above our future position, on a 98° orbit
+      const at = propagateKepler(s.r, s.v, this.tca);
+      const rHat = at.r.clone().normalize();
+      const pD = at.r.clone().addScaledVector(rHat, miss0);
+      const p = pD.clone().normalize();
+      const Y = new Vector3(0, 1, 0);
+      const e1 = Y.clone().addScaledVector(p, -Y.dot(p)).normalize();
+      const e2 = new Vector3().crossVectors(p, e1);
+      const cosTh = Math.max(-1, Math.min(1, Math.cos(98 * DEG) / Math.sqrt(1 - p.y * p.y)));
+      const th = Math.acos(cosTh);
+      const h = e1.multiplyScalar(Math.cos(th)).addScaledVector(e2, Math.sin(th)).normalize();
+      const vD = new Vector3().crossVectors(h, p).multiplyScalar(Math.sqrt(MU / pD.length()));
+      const back = propagateKepler(pD, vD, -this.tca);
+      this.deb = { r0: back.r.clone(), v0: back.v.clone(), t0: game.simTime };
+      this.tcaAbs = game.simTime + this.tca;
+      this.r = new Vector3();
+      this.v = new Vector3();
+      this.updateDebris(game);
+      game.extraTarget = { name: 'Debris fragment', kind: 'debris', r: this.r, v: this.v, closest: null };
+      this.predicted = miss0;
+      this.caTimer = 0;
+      this.burnAt = null;
+      this.passed = false;
+      game.view.setDebrisVisible?.(true);
+      game.objectives = [
+        { text: 'Assess the conjunction (TCA, miss distance)', state: 'active' },
+        { text: 'Avoidance burn: predicted miss ≥ 2 km', state: 'pending' },
+        { text: 'Survive the pass', state: 'pending' },
+      ];
+    },
+    updateDebris(game) {
+      const st = propagateKepler(this.deb.r0, this.deb.v0, game.simTime - this.deb.t0);
+      this.r.copy(st.r);
+      this.v.copy(st.v);
+    },
+    update(game, dt) {
+      const ship = game.ship;
+      const o = game.objectives;
+      this.updateDebris(game);
+      const tLeft = this.tcaAbs - game.simTime;
+      if (o[0].state === 'active' && game.missionTime > 3) {
+        o[0].state = 'done';
+        o[1].state = 'active';
+        game.toast('Flight Dynamics: maneuver required — Pc above red threshold', 'warn');
+        game.sfx?.('radio');
+      }
+      this.caTimer -= dt;
+      if (tLeft > 1 && this.caTimer <= 0) {
+        this.caTimer = 0.25;
+        const ca = closestApproach(ship.r, ship.v, this.r, this.v, tLeft + 30, 200);
+        this.predicted = ca.distance;
+        game.extraTarget.closest = ca;
+      }
+      if (tLeft < 40 && tLeft > 0) game.stopWarp('Conjunction imminent');
+      game.hint = tLeft > 0 ? `TCA ${Math.floor(tLeft / 60)}:${String(Math.floor(tLeft % 60)).padStart(2, '0')} · predicted miss ${this.predicted < 5000 ? this.predicted.toFixed(0) + ' m' : (this.predicted / 1000).toFixed(1) + ' km'}` : 'Fragment has passed';
+      if (o[1].state === 'active' && this.predicted >= 2000 && ship.throttle === 0 && ship.transInput.lengthSq() === 0) {
+        o[1].state = 'done';
+        o[2].state = 'active';
+        this.burnAt = tLeft;
+        game.award(300 + Math.round(200 * clamp01(tLeft / this.tca)), 'Safe miss distance');
+      }
+      if (!this.passed && tLeft < -3) {
+        this.passed = true;
+        // exact miss distance: propagate both back across TCA
+        const s0 = propagateKepler(ship.r, ship.v, -8);
+        const d0 = propagateKepler(this.r, this.v, -8);
+        const ca = closestApproach(s0.r, s0.v, d0.r, d0.v, 16, 400);
+        this.missDistance = ca.distance;
+        game.extraTarget.closest = null;
+        if (ca.distance < 8) {
+          ship.destroy('Struck by a debris fragment at ' + (ca.relSpeed / 1000).toFixed(1) + ' km/s');
+        } else if (ca.distance < 1000) {
+          o[2].state = 'failed';
+          game.complete(false, `Fragment passed only ${ca.distance.toFixed(0)} m away — unacceptable risk`);
+        } else {
+          o[2].state = 'done';
+          game.award(600, `Fragment passed at ${(ca.distance / 1000).toFixed(2)} km`);
+          game.complete(true, `Miss distance ${(ca.distance / 1000).toFixed(2)} km`);
+        }
+      }
+    },
+    finalize(game) {
+      const dv = game.ship.dvUsed + game.ship.rcsDvUsed;
+      return [
+        { label: `Margin (${(this.missDistance / 1000).toFixed(2)} km)`, points: Math.round(300 * clamp01((this.missDistance - 2000) / 3000)) },
+        { label: `Δv economy (${dv.toFixed(1)} m/s)`, points: Math.round(400 * clamp01(1 - dv / 20)) },
+        { label: `Early decision (${Math.round(this.burnAt ?? 0)} s before TCA)`, points: Math.round(200 * clamp01((this.burnAt ?? 0) / this.tca)) },
+      ];
+    },
+  },
+  // ------------------------------------------------------------------
+  {
     id: 'reentry',
     title: 'Deorbit & Re-entry',
-    tag: 'Module 6 · Return to Earth',
+    tag: 'Module 7 · Return to Earth',
     difficulty: 4,
     stars: [1400, 2000, 2400],
     summary: 'Deorbit, jettison the service module, fly the lifting entry and land under parachutes.',
@@ -480,6 +597,7 @@ export const MISSIONS = [
       ship.v.copy(s.v);
       pointShip(ship, s.v.clone().negate(), s.r);
       ship.setSasMode('retrograde');
+      if (game.modifiers?.rcsScale) ship.rcsFuel *= game.modifiers.rcsScale;
       this.awarded = {};
       game.objectives = [
         { text: 'Deorbit burn: periapsis 40–60 km', state: 'active' },
@@ -570,7 +688,7 @@ export const MISSIONS = [
     hasStation: true,
     free: true,
     setup(game, slot = 0) {
-      const nu = sunlitNu(INC, RAAN, -0.3);
+      const nu = sunlitNu(INC, RAAN, -0.9);
       game.createStation({ a: R_EARTH + 420 * KM, i: INC, raan: RAAN, nu0: nu, t0: game.simTime });
       const st = game.station;
       const ship = game.ship;

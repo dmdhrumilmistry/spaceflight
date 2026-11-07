@@ -6,6 +6,7 @@ import { Vector3, Quaternion, Matrix4 } from 'three';
 import { Game, WARP_LEVELS } from '../src/game/game.js';
 import { elementsFromState } from '../src/sim/orbit.js';
 import { R_EARTH } from '../src/sim/constants.js';
+import { Progress } from '../src/game/progress.js';
 
 function makeGame() {
   const toasts = [];
@@ -14,9 +15,10 @@ function makeGame() {
     orbitCam: {},
     debris: [],
     scene: { remove() {} },
-    station: { colliders: [{ min: new Vector3(-2.2, -2.2, -26.7), max: new Vector3(2.2, 2.2, 27) }] },
+    station: { colliders: [{ min: new Vector3(-2.2, -2.2, -19.7), max: new Vector3(2.2, 2.2, 27) }], portLocal: new Vector3(0, 0, -20.6) },
     shipModel: { detachServiceModule: () => ({}) },
     setStation() {},
+    setDebrisVisible() {},
     updateOrbitLine() {},
     spawnDebris() {},
     removeRemote() {},
@@ -33,6 +35,7 @@ function makeGame() {
       if (process.env.SHOW_SCORES) console.log(`[score] ${m.id}: ${r.total} (${r.stars}★) ${r.reason} :: ${JSON.stringify(r.bonuses)}`);
     },
     showPause() {},
+    achievement() {},
     update() {},
   };
   const input = {
@@ -48,7 +51,7 @@ function makeGame() {
       return false;
     },
   };
-  const progress = { best: () => null, record() {} };
+  const progress = new Progress();
   const game = new Game({ view, hud, input, net: null, progress });
   game.toasts = toasts;
   return game;
@@ -235,4 +238,54 @@ test('rendezvous mission: transfer at window, then close and match velocity', ()
   });
   assert.ok(game.result?.success, `${game.result?.reason} dist=${game.ship.r.distanceTo(game.station.r).toFixed(0)}`);
   assert.ok(game.result.total > 1300, `score ${game.result.total}`);
+});
+
+test('debris avoidance mission: burn to raise predicted miss, survive the pass', () => {
+  const game = makeGame();
+  game.start('debris');
+  game.launch();
+  let burned = false;
+  run(game, 60 * 900, () => {
+    const ship = game.ship;
+    const m = game.mission;
+    if (game.missionTime < 4) return;
+    if (!burned) {
+      // retrograde burn early: cheapest way to shift the encounter geometry
+      const f = ship.forward(new Vector3());
+      ship.q.premultiply(new Quaternion().setFromUnitVectors(f, ship.v.clone().normalize().negate()));
+      ship.w.set(0, 0, 0);
+      ship.throttle = m.predicted < 2600 ? 0.3 : 0;
+      if (ship.throttle === 0 && game.missionTime > 6) burned = true;
+    } else {
+      game.warpIndex = m.tcaAbs - game.simTime > 60 ? WARP_LEVELS.indexOf(10) : 0;
+    }
+  });
+  assert.ok(game.result?.success, game.result?.reason);
+  assert.ok(game.mission.missDistance > 2000, `miss ${game.mission.missDistance}`);
+});
+
+test('debris collision is detected when no burn is made', () => {
+  const game = makeGame();
+  game.start('debris', { modifiers: { miss: 3, tca: 120 } });
+  game.launch();
+  run(game, 60 * 400, () => {
+    game.warpIndex = game.mission.tcaAbs - game.simTime > 20 ? WARP_LEVELS.indexOf(5) : 0;
+  });
+  assert.equal(game.result?.success, false);
+  assert.ok(game.ship.destroyed, game.result?.reason);
+});
+
+test('agent telemetry exposes orbit, pointing and docking data', async () => {
+  const { telemetry } = await import('../src/agent/api.js');
+  const game = makeGame();
+  game.start('docking');
+  game.launch();
+  run(game, 30);
+  const t = telemetry(game);
+  assert.equal(t.mission.id, 'docking');
+  assert.ok(t.ship.altitudeM > 400000);
+  assert.ok(t.docking && t.docking.rangeM > 100 && t.docking.captureLimits.lateralM === 0.3);
+  assert.ok(typeof t.pointingErrorDeg.target === 'number');
+  assert.equal(t.target.name, 'ISS');
+  JSON.stringify(t);
 });

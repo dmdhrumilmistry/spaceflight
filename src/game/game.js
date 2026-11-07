@@ -7,6 +7,7 @@ import { propagateKepler, orbitalDirections, elementsFromState, closestApproach 
 import { airVelocity } from '../sim/atmosphere.js';
 import { ATMO_TOP } from '../sim/constants.js';
 import { getMission } from './missions.js';
+import { checkAchievements } from './achievements.js';
 
 export const WARP_LEVELS = [1, 2, 5, 10, 50, 100, 500, 1000];
 const PHYS_DT = 1 / 60;
@@ -45,8 +46,11 @@ export class Game {
   }
 
   // ------------------------------------------------------------------ setup
-  start(missionId, { slot = 0, multiplayer = false } = {}) {
+  start(missionId, { slot = 0, multiplayer = false, modifiers = null, daily = null } = {}) {
     const def = getMission(missionId);
+    this.modifiers = modifiers;
+    this.daily = daily;
+    this.extraTarget = null;
     this.mission = Object.create(def);
     this.missionId = missionId;
     this.multiplayer = multiplayer;
@@ -68,6 +72,7 @@ export class Game {
     this.view.camMode = 'chase';
     this.view.orbitCam = { yaw: 2.6, pitch: 0.18, dist: 28 };
     this.view.debris.forEach((d) => this.view.scene.remove(d.object));
+    this.view.setDebrisVisible?.(false);
     this.view.debris = [];
     this.mission.setup(this, slot);
     if (this.station) this.station.update(this.simTime);
@@ -80,30 +85,44 @@ export class Game {
     this.state = 'flying';
     this.hud.hideOverlays();
     this.toast(this.mission.title + ' — go for operations', 'info');
+    this.sfx('go');
+    this.audio?.setMood('cruise');
   }
 
   createStation(params) {
     this.view.setStation(true);
-    this.station = new Station({ ...params, colliders: this.view.station.colliders });
+    this.station = new Station({ ...params, colliders: this.view.station.colliders, portLocal: this.view.station.portLocal });
   }
 
   // ------------------------------------------------------------------ scoring
   award(points, label) {
     if (this.mission?.free) return;
+    this.combo = (this.combo || 0) + 1;
     this.score += points;
     this.scoreLog.push({ label, points });
-    this.hud.popup(`+${points}`, label, 'good');
+    this.hud.popup(`+${points}`, label, 'good', this.combo);
+    this.sfx(points >= 500 ? 'bigscore' : 'score', { intensity: Math.min(1, points / 800) });
   }
 
   penalize(points, label) {
     if (this.mission?.free) return;
+    this.combo = 0;
     this.score -= points;
     this.scoreLog.push({ label, points: -points });
     this.hud.popup(`−${points}`, label, 'bad');
+    this.sfx('warning');
   }
 
   toast(msg, type = 'info') {
     this.hud.toast(msg, type);
+  }
+
+  sfx(name, opts) {
+    try {
+      this.audio?.play(name, opts);
+    } catch {
+      /* audio is optional */
+    }
   }
 
   complete(success, reason) {
@@ -117,12 +136,58 @@ export class Game {
     const stars = this.mission.stars.filter((s) => success && total >= s && s > 0).length;
     const prev = this.progress.best(this.missionId);
     const isBest = !this.mission.free && success && total > (prev?.score || 0);
-    if (!this.mission.free) this.progress.record(this.missionId, { score: success ? total : 0, stars, success });
-    this.result = { success, reason, total, stars, bonuses, log: this.scoreLog.slice(), isBest };
+    let rec = { xpGained: 0, levelUp: 0 };
+    let unlocked = [];
+    if (!this.mission.free) {
+      rec = this.progress.record(this.missionId, { score: success ? total : 0, stars, success, daily: this.daily?.key });
+      const m = this.mission;
+      unlocked = checkAchievements({
+        progress: this.progress,
+        mission: this.missionId,
+        success,
+        free: !!m.free,
+        stars,
+        time: this.missionTime,
+        dvUsed: this.ship.dvUsed,
+        idealDv: m.idealDv,
+        contact: m.contact,
+        eclipse: this.ship.eclipse,
+        maxG: this.ship.maxG,
+        shield: this.ship.shield,
+        missDistance: m.missDistance,
+        destroyed: this.ship.destroyed,
+        daily: !!this.daily,
+        multiplayer: this.multiplayer,
+      });
+    }
+    this.result = {
+      success,
+      reason,
+      total,
+      stars,
+      bonuses,
+      log: this.scoreLog.slice(),
+      isBest,
+      xpGained: rec.xpGained,
+      levelUp: rec.levelUp,
+      achievements: unlocked,
+      daily: this.daily,
+    };
     if (this.net && this.net.active) {
       this.net.send({ t: 'result', score: total, success, reason, mission: this.missionId });
     }
-    setTimeout(() => this.hud.showResult(this.mission, this.result), success ? 1200 : 800);
+    if (success && !this.mission.free && this.onScore) {
+      this.onScore({ board: this.missionId, mission: this.missionId, score: total, stars, improved: isBest });
+      if (this.daily) this.onScore({ board: this.daily.board, mission: this.missionId, score: total, stars, improved: true });
+    }
+    this.audio?.setMood(success ? 'victory' : 'defeat');
+    this.sfx(success ? 'success' : 'fail');
+    setTimeout(() => {
+      this.hud.showResult(this.mission, this.result);
+      unlocked.forEach((a, i) => setTimeout(() => this.hud.achievement(a), 600 + i * 1400));
+      if (rec.levelUp) setTimeout(() => this.sfx('levelup'), 400);
+      unlocked.forEach((a, i) => setTimeout(() => this.sfx('achievement'), 600 + i * 1400));
+    }, success ? 1200 : 800);
   }
 
   stopWarp(reason) {
@@ -206,7 +271,7 @@ export class Game {
             const n = parseInt(code.slice(5), 10);
             if (n >= 1 && n <= 9) {
               if (ship.sasLocked) this.toast('SAS unavailable', 'bad');
-              else if ((n === 8 || n === 9) && !this.station) this.toast('No target selected', 'bad');
+              else if ((n === 8 || n === 9) && !this.target) this.toast('No target selected', 'bad');
               else ship.setSasMode(SAS_MODES[n - 1]);
             }
           }
@@ -316,9 +381,16 @@ export class Game {
       if (ev.type === 'fail') {
         this.toast(ev.msg, 'bad');
         this.penalize(100, ev.msg.split(' — ')[0]);
-      } else if (ev.type === 'warn') this.toast(ev.msg, 'warn');
-      else if (ev.type === 'destroyed') this.toast(ev.msg, 'bad');
-      else this.toast(ev.msg, 'info');
+      } else if (ev.type === 'warn') {
+        this.toast(ev.msg, 'warn');
+        this.sfx('warning');
+      } else if (ev.type === 'destroyed') {
+        this.toast(ev.msg, 'bad');
+        this.sfx('alarm');
+      } else this.toast(ev.msg, 'info');
+      if (ev.type === 'stage') this.sfx('stage');
+      else if (ev.type === 'chute') this.sfx('chute');
+      else if (ev.type === 'landed') this.sfx('splash');
       if (ev.type !== 'warn') this.stopWarp();
     }
     ship.events.length = 0;
@@ -331,15 +403,17 @@ export class Game {
 
     // closest approach (2 Hz)
     this.caTimer -= dt;
-    if (this.station && this.caTimer <= 0) {
+    const tgt = this.target;
+    if (tgt && this.caTimer <= 0) {
       this.caTimer = 0.5;
-      const dist = ship.r.distanceTo(this.station.r);
-      if (dist > 1500 && ship.altitude > ATMO_TOP) {
+      const dist = ship.r.distanceTo(tgt.r);
+      if (tgt.closest) this.closest = tgt.closest;
+      else if (dist > 1500 && ship.altitude > ATMO_TOP) {
         const el = elementsFromState(ship.r, ship.v);
         const win = Math.min(isFinite(el.period) ? el.period : 6000, 7000);
-        this.closest = closestApproach(ship.r, ship.v, this.station.r, this.station.v, win, 160);
+        this.closest = closestApproach(ship.r, ship.v, tgt.r, tgt.v, win, 160);
       } else this.closest = null;
-    }
+    } else if (!tgt) this.closest = null;
 
     // orbit lines (5 Hz, or when map)
     this.lastOrbitUpdate -= dt;
@@ -347,7 +421,7 @@ export class Game {
       this.lastOrbitUpdate = this.view.camMode === 'map' ? 0.1 : 0.25;
       const showShip = ship.altitude > 0 && !ship.landed;
       this.view.updateOrbitLine('ship', ship.r, ship.v, showShip);
-      if (this.station) this.view.updateOrbitLine('target', this.station.r, this.station.v, true);
+      if (this.target) this.view.updateOrbitLine('target', this.target.r, this.target.v, true);
       else this.view.updateOrbitLine('target', null, null, false);
     }
 
@@ -358,8 +432,12 @@ export class Game {
     this.view.shake = Math.min(3, Math.max(0, ship.gForce - 1.5) * 0.6 + ship.heatFlux / 4e5 + (ship.thrustActive ? 0.15 : 0));
 
     const dirs = orbitalDirections(ship.r, ship.altitude < 70000 ? ship.airVel : ship.v);
-    const targetDir = this.station ? this.targetPos().sub(ship.r).normalize() : null;
+    const targetDir = this.target ? this.targetPos().sub(ship.r).normalize() : null;
     const remotes = this.remoteRenderStates();
+    if (this.skipRender) {
+      ship.eclipse = this.view.computeEclipse ? this.view.computeEclipse(ship.r) : 1;
+      return;
+    }
     const { eclipse } = this.view.render({
       ship,
       simTime: this.simTime,
@@ -368,17 +446,60 @@ export class Game {
       remotes,
       navball: { dirs, targetDir },
       mapFocus: null,
+      fragment: this.extraTarget && this.extraTarget.kind === 'debris' ? this.extraTarget : null,
     });
     ship.eclipse = eclipse;
     this.hud.update(this, dt, remotes);
+    this.updateAudio(dt);
+  }
+
+  updateAudio(dt) {
+    const a = this.audio;
+    if (!a) return;
+    const ship = this.ship;
+    const rc = ship.rotCmd;
+    const tc = ship.transCmd;
+    const rcs = Math.min(1, (Math.abs(rc.x) + Math.abs(rc.y) + Math.abs(rc.z)) * 0.4 + (Math.abs(tc.x) + Math.abs(tc.y) + Math.abs(tc.z)) * 0.6);
+    a.update(dt, {
+      throttle: ship.throttle,
+      thrustActive: ship.thrustActive,
+      rcs: ship.rcsEnabled && ship.rcsFuel > 0 ? rcs : 0,
+      dynPressure: ship.dynPressure,
+      heatFlux: ship.heatFlux,
+      gForce: ship.gForce,
+      altitude: ship.altitude,
+      inAtmosphere: ship.altitude < 100000,
+      chute: ship.chute,
+      paused: this.state === 'paused' || this.state === 'briefing',
+    });
+    // music follows the situation
+    if (this.state !== 'flying') return;
+    this.moodTimer = (this.moodTimer || 0) - dt;
+    if (this.moodTimer > 0) return;
+    this.moodTimer = 1;
+    let mood = 'cruise';
+    const tgt = this.target;
+    if (ship.heatFlux > 5e4 || (ship.stage === 1 && ship.altitude < 130000 && ship.chute === 'stowed')) mood = 'reentry';
+    else if (this.docking && this.docking.range < 60 && !this.docked) mood = 'tension';
+    else if (this.extraTarget && this.mission.tcaAbs && this.mission.tcaAbs - this.simTime < 120 && this.mission.tcaAbs - this.simTime > -5) mood = 'tension';
+    else if (tgt && tgt.kind === 'station' && ship.r.distanceTo(tgt.r) < 2000 && !this.docked) mood = 'tension';
+    if (mood !== this.mood) {
+      this.mood = mood;
+      a.setMood(mood);
+    }
   }
 
   readControls(dt) {
     const ship = this.ship;
     const I = this.input;
     // KSP-style: W pitch down (nose down) / S pitch up; A/D yaw; Q/E roll
-    ship.rotInput.set(I.axis('KeyW', 'KeyS'), I.axis('KeyD', 'KeyA'), I.axis('KeyE', 'KeyQ'));
-    ship.transInput.set(I.axis('KeyJ', 'KeyL'), I.axis('KeyK', 'KeyI'), I.axis('KeyH', 'KeyN'));
+    const v1 = I.virtual || {};
+    const v2 = I.agent || {};
+    const vv = {};
+    for (const k of ['pitch', 'yaw', 'roll', 'x', 'y', 'z']) vv[k] = (v1[k] || 0) + (v2[k] || 0);
+    const c1 = (x) => Math.max(-1, Math.min(1, x));
+    ship.rotInput.set(c1(I.axis('KeyW', 'KeyS') + (vv.pitch || 0)), c1(I.axis('KeyD', 'KeyA') + (vv.yaw || 0)), c1(I.axis('KeyE', 'KeyQ') + (vv.roll || 0)));
+    ship.transInput.set(c1(I.axis('KeyJ', 'KeyL') + (vv.x || 0)), c1(I.axis('KeyK', 'KeyI') + (vv.y || 0)), c1(I.axis('KeyH', 'KeyN') + (vv.z || 0)));
     const dth = I.axis('KeyF', 'KeyR');
     if (dth !== 0) ship.throttle = Math.max(0, Math.min(1, ship.throttle + dth * dt * 0.7));
     if (ship.stage !== 0 && ship.throttle > 0) ship.throttle = 0;
@@ -391,14 +512,20 @@ export class Game {
     }
   }
 
+  /** Current navigation target: the station, or a mission-provided object (e.g. debris). */
+  get target() {
+    if (this.station) return { name: this.station.name || 'Station', kind: 'station', r: this.station.r, v: this.station.v };
+    return this.extraTarget || null;
+  }
+
   sasEnv() {
-    return { targetPos: this.station ? this.targetPos() : null };
+    return { targetPos: this.target ? this.targetPos() : null };
   }
 
   targetPos() {
     // target the docking port when close, otherwise the station centre
     const st = this.station;
-    if (!st) return null;
+    if (!st) return this.extraTarget ? this.extraTarget.r.clone() : null;
     const d = st.r.distanceTo(this.ship.r);
     return d < 1500 ? st.portWorld() : st.r.clone();
   }
@@ -475,6 +602,7 @@ export class Game {
       ship.v.copy(pv).addScaledVector(axis, Math.max(0.05, d.closing * 0.5));
       ship.r.addScaledVector(axis, 0.15);
       this.penalize(150, 'Hard contact — misaligned');
+      this.sfx('bump');
       return;
     }
     // structural collisions
@@ -492,6 +620,7 @@ export class Game {
           ship.v.copy(pv).addScaledVector(away, 0.2 + rel.length() * 0.3);
           ship.r.addScaledVector(away, 0.2);
           this.penalize(200, 'Bumped the station structure');
+          this.sfx('bump');
         }
         return;
       }
@@ -515,6 +644,7 @@ export class Game {
     ship.throttle = 0;
     this.applyDockedPose();
     this.toast('Soft capture — hooks closed', 'good');
+    this.sfx('dock');
     this.stopWarp();
     if (this.mission.onDock) this.mission.onDock(this, contact);
   }

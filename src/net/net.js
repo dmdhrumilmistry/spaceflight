@@ -1,8 +1,8 @@
-// WebRTC multiplayer. Star topology: the room host holds one RTCPeerConnection
-// per guest and relays messages. Two data channels per peer: "rel" (reliable,
-// ordered: chat, roster, start, results) and "fast" (unordered, no retransmit:
-// 10 Hz spacecraft state). Signaling via a tiny WebSocket relay server, or a
-// serverless copy/paste of SDP codes.
+// WebRTC multiplayer — no game server. Star topology: the room host holds one
+// RTCPeerConnection per guest and relays messages. Two data channels per peer:
+// "rel" (reliable, ordered: chat, roster, start, results) and "fast"
+// (unordered, no retransmit: 10 Hz spacecraft state). The WebRTC handshake is
+// exchanged over public Nostr relays (room codes), or by copy/pasting codes.
 
 const DEFAULT_ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
 export const PLAYER_COLORS = ['#ffb347', '#7fe8ff', '#ff6fb5', '#9dff6f', '#c79bff', '#ffe66f', '#6fffd2', '#ff8a6f'];
@@ -16,6 +16,12 @@ function decode(code) {
 function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
+function roomCode() {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const r = crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(r, (x) => A[x % A.length]).join('');
+}
+const MAX_PLAYERS = 8;
 
 function waitIceComplete(pc, timeout = 4000) {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
@@ -34,14 +40,13 @@ export class Net {
   constructor({ iceServers = DEFAULT_ICE } = {}) {
     this.iceServers = iceServers;
     this.role = null; // 'host' | 'guest'
-    this.mode = null; // 'server' | 'manual'
+    this.mode = null; // 'nostr' | 'manual'
     this.id = randomId();
     this.name = 'Pilot';
     this.color = PLAYER_COLORS[0];
     this.peers = new Map(); // remoteId -> { pc, rel, fast, name }
     this.players = new Map(); // id -> { name, color }
     this.handlers = new Map();
-    this.ws = null;
     this.room = null;
     this.hostId = null;
     this.pendingManual = null;
@@ -65,105 +70,142 @@ export class Net {
     }
   }
 
-  // ------------------------------------------------------------------ server signaling
-  connectServer(url) {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
-      this.ws = ws;
-      const timer = setTimeout(() => reject(new Error('Signaling server timeout')), 6000);
-      ws.onopen = () => {
-        clearTimeout(timer);
-        ws.send(JSON.stringify({ type: 'hello', id: this.id, name: this.name }));
-        resolve();
-      };
-      ws.onerror = () => {
-        clearTimeout(timer);
-        reject(new Error('Could not reach signaling server'));
-      };
-      ws.onclose = () => this.emit('status', 'Signaling connection closed');
-      ws.onmessage = (ev) => this.onSignal(JSON.parse(ev.data));
-    });
+  // ------------------------------------------------------------------ Nostr signaling (no server)
+  async ensureBus() {
+    if (!this.nostrMod) {
+      this.nostrMod = await import('./nostr.js');
+      this.bus = new this.nostrMod.NostrBus(this.relays || this.nostrMod.DEFAULT_RELAYS);
+    }
+    return this.nostrMod;
   }
 
-  wsSend(obj) {
-    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(obj));
-  }
-
-  async hostRoom(url, name) {
+  /** Host a room; the room code is shared with friends (or listed publicly). */
+  async hostRoom(name, { isPublic = true, mission = 'free' } = {}) {
+    const m = await this.ensureBus();
     this.name = name;
-    this.mode = 'server';
-    await this.connectServer(url);
-    return new Promise((resolve, reject) => {
-      this._roomResolve = resolve;
-      this._roomReject = reject;
-      this.wsSend({ type: 'create' });
-    });
+    this.mode = 'nostr';
+    this.role = 'host';
+    this.hostId = this.id;
+    this.room = roomCode();
+    this.players.set(this.id, { name: this.name, color: this.color });
+    this.signal = new m.NostrSignaling(this.bus);
+    this.signal.listen(this.room, (msg) => this.onNostrSignal(msg));
+    this.isPublic = isPublic;
+    this.lobbyMission = mission;
+    if (isPublic) {
+      this.announce();
+      this.announceTimer = setInterval(() => this.announce(), 60000);
+    }
+    this.emit('roster', this.roster());
+    return this.room;
   }
 
-  async joinRoom(url, room, name) {
+  announce(closed = false) {
+    if (!this.isPublic || !this.signal || this.role !== 'host') return;
+    this.nostrMod
+      .announceRoom(this.bus, this.signal.sk, {
+        room: this.room,
+        name: this.name,
+        mission: this.lobbyMission,
+        players: this.players.size,
+        max: MAX_PLAYERS,
+        closed,
+        v: 1,
+      })
+      .catch(() => {});
+  }
+
+  setLobbyMission(mission) {
+    this.lobbyMission = mission;
+    this.announce();
+  }
+
+  async listPublicRooms() {
+    const m = await this.ensureBus();
+    return m.listRooms(this.bus);
+  }
+
+  // ------------------------------------------------------------------ global leaderboard
+  async identity() {
+    const m = await this.ensureBus();
+    if (!this._identity) this._identity = m.loadIdentity();
+    return this._identity;
+  }
+
+  async publishScore(entry) {
+    const m = await this.ensureBus();
+    return m.publishScore(this.bus, await this.identity(), entry);
+  }
+
+  async leaderboard(board, limit = 25) {
+    const m = await this.ensureBus();
+    const rows = await m.fetchLeaderboard(this.bus, board, limit);
+    const me = (await this.identity()).pk;
+    return rows.map((r) => ({ ...r, me: r.pubkey === me }));
+  }
+
+  /** Join a room by code: announce ourselves until the host sends an offer. */
+  async joinRoom(code, name) {
+    const m = await this.ensureBus();
     this.name = name;
-    this.mode = 'server';
-    await this.connectServer(url);
-    return new Promise((resolve, reject) => {
-      this._roomResolve = resolve;
-      this._roomReject = reject;
-      this.wsSend({ type: 'join', room: room.toUpperCase().trim() });
-    });
+    this.mode = 'nostr';
+    this.role = 'guest';
+    this.room = code.toUpperCase().trim();
+    this.gotOffer = false;
+    this.signal = new m.NostrSignaling(this.bus);
+    this.signal.listen(this.room, (msg) => this.onNostrSignal(msg));
+    const sendJoin = () => this.signal.send(this.room, 'join', { name: this.name, id: this.id }).catch((e) => this.emit('status', e.message));
+    await new Promise((r) => setTimeout(r, 900)); // let subscriptions settle
+    sendJoin();
+    this.emit('status', `Looking for room ${this.room} on Nostr relays…`);
+    let tries = 0;
+    this.joinTimer = setInterval(() => {
+      if (this.gotOffer || this.role !== 'guest') return clearInterval(this.joinTimer);
+      if (++tries > 6) {
+        clearInterval(this.joinTimer);
+        this.emit('status', 'No host answered. Check the room code (rooms close when the host leaves).');
+        return;
+      }
+      sendJoin();
+    }, 4000);
+    return this.room;
   }
 
-  async onSignal(msg) {
-    switch (msg.type) {
-      case 'created':
-        this.role = 'host';
-        this.room = msg.room;
-        this.hostId = this.id;
-        this.players.set(this.id, { name: this.name, color: this.color });
-        this._roomResolve?.(msg.room);
-        this.emit('roster', this.roster());
-        break;
-      case 'joined':
-        this.role = 'guest';
-        this.room = msg.room;
-        this.hostId = msg.hostId;
-        this._roomResolve?.(msg.room);
-        this.emit('status', `Joined room ${msg.room}, connecting to host…`);
-        break;
-      case 'error':
-        this._roomReject?.(new Error(msg.message));
-        this.emit('status', msg.message);
-        break;
-      case 'peer-joined': {
-        // host: start a WebRTC connection to the new guest
-        if (this.role !== 'host') break;
-        const peer = this.makePeer(msg.id, true);
-        peer.name = msg.name;
+  async onNostrSignal({ type, from, body }) {
+    try {
+      if (this.role === 'host' && type === 'join') {
+        const gid = String(body.id || from).slice(0, 32);
+        const existing = this.peers.get(gid);
+        if (existing && !['failed', 'closed'].includes(existing.pc.connectionState)) return;
+        if (existing) this.dropPeer(gid);
+        if (this.players.size >= MAX_PLAYERS) return;
+        const peer = this.makePeer(gid, true);
+        peer.name = String(body.name || 'Pilot').slice(0, 24);
+        peer.nostrPk = from;
         const offer = await peer.pc.createOffer();
         await peer.pc.setLocalDescription(offer);
-        this.wsSend({ type: 'signal', to: msg.id, data: { sdp: peer.pc.localDescription } });
-        break;
+        await waitIceComplete(peer.pc);
+        await this.signal.send(this.room, 'offer', { sdp: peer.pc.localDescription, guestId: gid, hostId: this.id }, from);
+        this.emit('status', `${peer.name} is connecting…`);
+      } else if (this.role === 'guest' && type === 'offer') {
+        if (body.guestId !== this.id || this.gotOffer) return;
+        this.gotOffer = true;
+        this.hostId = body.hostId;
+        const peer = this.makePeer(body.hostId, false);
+        await peer.pc.setRemoteDescription(body.sdp);
+        const ans = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(ans);
+        await waitIceComplete(peer.pc);
+        await this.signal.send(this.room, 'answer', { sdp: peer.pc.localDescription, guestId: this.id }, from);
+        this.emit('status', 'Host found — establishing peer-to-peer link…');
+      } else if (this.role === 'host' && type === 'answer') {
+        const peer = this.peers.get(body.guestId);
+        if (!peer || peer.nostrPk !== from) return;
+        if (peer.pc.signalingState === 'have-local-offer') await peer.pc.setRemoteDescription(body.sdp);
       }
-      case 'peer-left':
-        this.dropPeer(msg.id);
-        break;
-      case 'signal': {
-        const { from, data } = msg;
-        let peer = this.peers.get(from);
-        if (!peer) peer = this.makePeer(from, false);
-        if (data.sdp) {
-          await peer.pc.setRemoteDescription(data.sdp);
-          if (data.sdp.type === 'offer') {
-            const ans = await peer.pc.createAnswer();
-            await peer.pc.setLocalDescription(ans);
-            this.wsSend({ type: 'signal', to: from, data: { sdp: peer.pc.localDescription } });
-          }
-          for (const c of peer.queued || []) await peer.pc.addIceCandidate(c).catch(() => {});
-          peer.queued = [];
-        } else if (data.candidate) {
-          if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(data.candidate).catch(() => {});
-          else (peer.queued ||= []).push(data.candidate);
-        }
-        break;
-      }
+    } catch (e) {
+      console.warn('signaling error', e);
+      this.emit('status', 'Signaling error: ' + e.message);
     }
   }
 
@@ -220,6 +262,8 @@ export class Net {
     this.peers.set(remoteId, peer);
     const wire = (ch) => {
       ch.onopen = () => this.onChannelOpen(peer, ch);
+      // the answering side may receive a channel that is already open
+      if (ch.readyState === 'open') queueMicrotask(() => this.onChannelOpen(peer, ch));
       ch.onmessage = (ev) => this.onData(peer, ev.data);
       ch.onclose = () => {
         if (ch.label === 'rel') this.dropPeer(remoteId);
@@ -237,9 +281,6 @@ export class Net {
         wire(ev.channel);
       };
     }
-    pc.onicecandidate = (ev) => {
-      if (ev.candidate && this.mode === 'server') this.wsSend({ type: 'signal', to: remoteId, data: { candidate: ev.candidate } });
-    };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed') {
         this.emit('status', 'Peer connection failed (NAT?). Try another network or a TURN server.');
@@ -286,6 +327,7 @@ export class Net {
     const players = [...this.players.entries()].map(([id, p]) => ({ id, ...p }));
     this.broadcast({ t: 'roster', players, hostId: this.id });
     this.emit('roster', this.roster());
+    this.announce();
   }
 
   // ------------------------------------------------------------------ messaging
@@ -369,6 +411,11 @@ export class Net {
   }
 
   leave() {
+    if (this.role === 'host') this.announce(true);
+    clearInterval(this.announceTimer);
+    clearInterval(this.joinTimer);
+    if (this.signal) this.signal.close();
+    this.signal = null;
     for (const id of [...this.peers.keys()]) {
       const p = this.peers.get(id);
       try {
@@ -379,10 +426,9 @@ export class Net {
     }
     this.peers.clear();
     this.players.clear();
-    if (this.ws) this.ws.close();
-    this.ws = null;
     this.role = null;
     this.room = null;
     this.mode = null;
+    this.isPublic = false;
   }
 }
