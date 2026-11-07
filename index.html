@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#05070d" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="help" href="llms.txt" type="text/plain" title="Guide for AI agents" />
+    <title>Orbital Academy — Spaceflight Training Simulator</title>
+    <meta name="description" content="A realistic 3D spaceflight simulator for astronaut training: dock with the ISS, dodge orbital debris, fly a lifting re-entry. Points, daily challenges, global leaderboard and serverless multiplayer." />
+    <meta property="og:title" content="Orbital Academy — Spaceflight Training Simulator" />
+    <meta property="og:description" content="Dock with the ISS, dodge debris, survive re-entry. Free, in your browser." />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="scene"></div>
+    <div id="ui"></div>
+    <div id="menuLayer"></div>
+    <div id="loading">
+      <div class="loadbox">
+        <div class="spinner"></div>
+        <h1>ORBITAL ACADEMY</h1>
+        <p id="loadingText">Initialising…</p>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

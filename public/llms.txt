@@ -1,0 +1,30 @@
+# Orbital Academy
+
+> A realistic 3D spaceflight training simulator that runs in the browser (desktop and mobile). Players fly a crew capsule in low Earth orbit: attitude control, orbit circularization, Hohmann transfer, rendezvous and manual docking with the International Space Station, orbital-debris avoidance, and a lifting re-entry with parachute splashdown. Points-based with stars, XP, patches, a daily challenge and a global leaderboard on Nostr. Multiplayer is serverless WebRTC.
+
+## Playing as an AI agent
+
+Open the game page and use the JavaScript API at `window.orbitalAcademy` (no UI clicks needed):
+
+- `orbitalAcademy.describe()` — this summary of the API.
+- `orbitalAcademy.missions()` — list of modules: `attitude`, `circularize`, `hohmann`, `rendezvous`, `docking`, `debris`, `reentry`, `free`.
+- `orbitalAcademy.start(id)` — start a module (briefing skipped).
+- `orbitalAcademy.state()` — JSON telemetry: altitude, speeds, apoapsis/periapsis, eccentricity, inclination, attitude quaternion, angular rates, propellant, Δv remaining, SAS mode, g-load, heat flux, heat shield, pointing error (degrees) to prograde/retrograde/normal/radial/target markers, target range and closest approach, docking alignment (lateral offset, closing rate, angle, roll, capture limits), objectives, hint text, score and result.
+- `orbitalAcademy.controls({pitch, yaw, roll, x, y, z, throttle})` — continuous inputs. Rotation and translation in [-1, 1]; throttle in [0, 1]. pitch>0 nose up, yaw>0 nose left, roll>0 roll left, x>0 translate right, y>0 up, z<0 forward. Values persist until changed.
+- `orbitalAcademy.command(name, value)` — `sas` (bool), `sasMode` (`stability|prograde|retrograde|normal|antinormal|radialOut|radialIn|target|antiTarget`), `stage` (jettison service module → drogue → main chutes), `warp` (0–7 → 1×,2×,5×,10×,50×,100×,500×,1000×), `undock`, `camera`, `map`, `rcs` (bool), `autoRoll` (bool), `pause`, `resume`.
+- `orbitalAcademy.step(seconds)` — advance the simulation deterministically at 60 Hz without rendering; returns `state()`.
+
+Typical loop: `start('docking')` → repeat { `s = state()`; decide inputs from `s.docking`; `controls({...})`; `step(0.5)` } until `s.result`.
+
+## Tips that matter for scoring
+
+- Use SAS modes instead of manual rotation for pointing (`command('sasMode','prograde')`).
+- Burns at apoapsis raise periapsis and vice versa. Ideal Δv values are shown in the `hint`.
+- Docking capture: lateral < 0.3 m, angle < 5°, roll < 8°, closing 0.05–0.3 m/s. Slow down to < 1 m/s inside 30 m.
+- Debris avoidance: raise the predicted miss distance above 2 km before TCA; earlier burns are cheaper.
+- Re-entry: deorbit to a 40–60 km periapsis, `stage` to jettison the service module above 120 km, hold `retrograde` with `autoRoll` on (lift vector up keeps g-load low), drogues below 12 km and 300 m/s, mains below 7 km.
+
+## Source
+
+- Repository: https://github.com/dmdhrumilmistry/spaceflight
+- Architecture and contributor guide for coding agents: AGENTS.md in the repository root.
